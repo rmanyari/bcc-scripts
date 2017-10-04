@@ -31,6 +31,7 @@ import argparse
 import struct
 import socket
 import json
+import logging
 from socket import inet_ntoa, AF_INET, AF_INET6
 from struct import pack
 from time import sleep, strftime
@@ -41,31 +42,58 @@ import ctypes as ct
 # arguments
 examples = """examples:
     ./tcpdest                              # trace TCP send to all subnets
+    ./tcpdest -s kb                        # trace TCP send to all subnets
+                                           # aggregated in kb
     ./tcpdest -S 10.80.0.0/24,10.80.1.0/24 # trace TCP send and groups the
                                            # aggregated bytes by subnet. By
                                            # default 0.0.0.0/0 is added at
                                            # runtime
+    ./tcpdest -J                           # format the output in JSON
 """
 parser = argparse.ArgumentParser(
     description="Summarize TCP send and aggregate by subnet",
     formatter_class=argparse.RawDescriptionHelpFormatter,
     epilog=examples)
-parser.add_argument("-S", "--subnets",
-    help="comma separated list of subnets")
+parser.add_argument("-v", "--verbose", action="store_true",
+    help="output debug statements")
 parser.add_argument("-J", "--json", action="store_true",
     help="format output in JSON")
+parser.add_argument("-S", "--subnets",
+    help="comma separated list of subnets")
 parser.add_argument("interval", nargs="?", default=1,
     help="output interval, in seconds (default 1)")
+parser.add_argument("-s", "--size", default="b",
+    help="size of aggregations, supported values are b, kb, mb, gb")
 args = parser.parse_args()
-print(args)
+
+if args.verbose:
+    logging.basicConfig(level=logging.DEBUG)
+
+
+logging.debug("Starting with the following args:")
+logging.debug(args)
+
+# args checking
 if args.interval and int(args.interval) == 0:
-    print("ERROR: interval 0. Exiting.")
-    exit()
+    logging.error("interval 0. Exiting.")
+    exit(1)
 
-# linux stats
-loadavg = "/proc/loadavg"
+# map of supported sizes
+sizes = {
+    "b": pow(1024, 0),
+    "kb": pow(1024, 1),
+    "mb": pow(1024, 2),
+    "gb": pow(1024, 3)
+}
 
-# define BPF program
+if args.size in sizes:
+    args.size = sizes[args.size] # let's swap the string value by 
+                                 # actual numeric value
+else:
+    logging.error("size [%s] is not supported. See --help to get the list of supported size(s)" % args.size)
+    exit(1)
+
+# define the basic structure of the BPF program
 bpf_text = """
 #include <uapi/linux/ptrace.h>
 #include <net/sock.h>
@@ -114,11 +142,11 @@ def mask_to_int(n):
 #   ['0.0.0.0/0', 0, 0]
 # ]
 def parse_subnets(subnets):
-    all_subnets = subnets + ['0.0.0.0/0']
+    all_subnets = subnets + ["0.0.0.0/0"]
     m = []
     for s in all_subnets:
-        parts = s.split('/')
-        netaddr_int = struct.unpack('!I', socket.inet_aton(parts[0]))[0]
+        parts = s.split("/")
+        netaddr_int = struct.unpack("!I", socket.inet_aton(parts[0]))[0]
         mask_int = mask_to_int(int(parts[1]))
         m.append([s, netaddr_int, mask_int])
     return m
@@ -135,26 +163,35 @@ def generate_bpf_subnets(subnets):
     bpf = ''
     for i,s in enumerate(subnets):
         branch = template
-        branch = branch.replace('__NET_ADDR__', str(s[1]))
-        branch = branch.replace('__NET_MASK__', str(s[2]))
-        branch = branch.replace('__POS__', str(i))
+        branch = branch.replace("__NET_ADDR__", str(s[1]))
+        branch = branch.replace("__NET_MASK__", str(s[2]))
+        branch = branch.replace("__POS__", str(i))
         bpf += branch
     return bpf
 
 subnets = []
 if args.subnets:
-    subnets = args.subnets.split(',')
+    subnets = args.subnets.split(",")
 
 subnets = parse_subnets(subnets)
+
+logging.debug("Packets are going to be categories in the following subnets:")
+logging.debug(subnets)
+
+
 bpf_subnets = generate_bpf_subnets(subnets)
 
 # initialize BPF
-b = BPF(text=bpf_text.replace('__SUBNETS__', bpf_subnets))
+bpf_text = bpf_text.replace("__SUBNETS__", bpf_subnets)
+
+logging.debug("Done preprocessing the BPF program, this is what will actually get executed:")
+logging.debug(bpf_text)
+
+b = BPF(text=bpf_text)
 
 ipv4_send_bytes = b["ipv4_send_bytes"]
 
-if not args.json:
-    print('Tracing... Output every %s secs. Hit Ctrl-C to end' % args.interval)
+logging.debug("Tracing... Output every %s secs. Hit Ctrl-C to end" % args.interval)
 
 # output
 exiting = 0
@@ -182,7 +219,7 @@ while (1):
         if k in ipv4_send_bytes:
             send_bytes = int(ipv4_send_bytes[k].value)
         subnet = subnets[k.index][0]
-        send = send_bytes
+        send = send_bytes / float(args.size)
         if args.json:
             data[subnet] = send
         else:
