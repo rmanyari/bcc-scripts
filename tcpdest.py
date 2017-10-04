@@ -4,7 +4,7 @@
 # tcpdest   Summarize TCP bytes send to different subnets.
 #           For Linux, uses BCC, eBPF. Embedded C.
 #
-# USAGE: tcpdest [-h] [-C] [-S]
+# USAGE: tcpdest [-h] [-J] [[-S] ...subnets]
 #
 # This uses dynamic tracing of kernel functions, and will need to be updated
 # to match kernel changes.
