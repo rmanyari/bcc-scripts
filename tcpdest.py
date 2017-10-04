@@ -9,6 +9,9 @@
 # This uses dynamic tracing of kernel functions, and will need to be updated
 # to match kernel changes.
 #
+# This is an adaptation of tcptop from the original bcc/tools, written
+# by Brendan Gregg
+#
 # WARNING: This traces all send at the TCP level, and while it
 # summarizes data in-kernel to reduce overhead, there may still be some
 # overhead at high TCP send/receive rates (eg, ~13% of one CPU at 100k TCP
@@ -27,6 +30,7 @@ from bcc import BPF
 import argparse
 import struct
 import socket
+import json
 from socket import inet_ntoa, AF_INET, AF_INET6
 from struct import pack
 from time import sleep, strftime
@@ -37,18 +41,19 @@ import ctypes as ct
 # arguments
 examples = """examples:
     ./tcpdest                              # trace TCP send to all subnets
-    ./tcpdest -C                           # don't clear the screen
-    ./tcpdest -S 10.80.0.0/24,10.80.1.0/24 # trace TCP send all the two subnets
-                                           # passed to -S
+    ./tcpdest -S 10.80.0.0/24,10.80.1.0/24 # trace TCP send and groups the
+                                           # aggregated bytes by subnet. By
+                                           # default 0.0.0.0/0 is added at
+                                           # runtime
 """
 parser = argparse.ArgumentParser(
-    description="Summarize TCP send throughput by host",
+    description="Summarize TCP send and aggregate by subnet",
     formatter_class=argparse.RawDescriptionHelpFormatter,
     epilog=examples)
-parser.add_argument("-C", "--noclear", action="store_true",
-    help="don't clear the screen")
 parser.add_argument("-S", "--subnets",
     help="comma separated list of subnets")
+parser.add_argument("-J", "--json", action="store_true",
+    help="format output in JSON")
 parser.add_argument("interval", nargs="?", default=1,
     help="output interval, in seconds (default 1)")
 args = parser.parse_args()
@@ -80,7 +85,6 @@ int kprobe__tcp_sendmsg(struct pt_regs *ctx, struct sock *sk,
 
     if (family == AF_INET) {
         u32 dst = sk->__sk_common.skc_daddr;
-        bpf_trace_printk("rodrigo address= %d\\n", dst);
         unsigned categorized = 0;
         __SUBNETS__
     }
@@ -145,13 +149,12 @@ subnets = parse_subnets(subnets)
 bpf_subnets = generate_bpf_subnets(subnets)
 
 # initialize BPF
-bpf_text = bpf_text.replace('__SUBNETS__', bpf_subnets)
-print(bpf_text)
-b = BPF(text=bpf_text)
+b = BPF(text=bpf_text.replace('__SUBNETS__', bpf_subnets))
 
 ipv4_send_bytes = b["ipv4_send_bytes"]
 
-print('Tracing... Output every %s secs. Hit Ctrl-C to end' % args.interval)
+if not args.json:
+    print('Tracing... Output every %s secs. Hit Ctrl-C to end' % args.interval)
 
 # output
 exiting = 0
@@ -171,15 +174,22 @@ while (1):
         if k not in keys:
             keys[k] = v
 
-    if keys:
-        print("%-21s %6s" % ("RADDR", "TX"))
+    data = {}
 
     # output
     for k, v in reversed(sorted(keys.items(), key=lambda keys: keys[1].value)):
-        send_kbytes = 0
+        send_bytes = 0
         if k in ipv4_send_bytes:
-            send_kbytes = int(ipv4_send_bytes[k].value)
-        print("%-21s %6d" % (subnets[k.index][0], send_kbytes))
+            send_bytes = int(ipv4_send_bytes[k].value)
+        subnet = subnets[k.index][0]
+        send = send_bytes
+        if args.json:
+            data[subnet] = send
+        else:
+            print("%-21s %6d" % (subnet, send))
+
+    if args.json:
+        print(json.dumps(data))
 
     ipv4_send_bytes.clear()
     
