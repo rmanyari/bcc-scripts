@@ -25,19 +25,13 @@
 #
 # 03-Oct-2017   Rodrigo Manyari   Created this based on tcptop.
 
-from __future__ import print_function
-from bcc import BPF
 import argparse
-import struct
-import socket
 import json
 import logging
-from socket import inet_ntoa, AF_INET, AF_INET6
-from struct import pack
-from time import sleep, strftime
-from subprocess import call
-from ctypes import *
-import ctypes as ct
+import struct
+import socket
+from bcc import BPF
+from time import sleep
 
 # arguments
 examples = """examples:
@@ -60,23 +54,27 @@ parser.add_argument("-J", "--json", action="store_true",
     help="format output in JSON")
 parser.add_argument("-S", "--subnets",
     help="comma separated list of subnets")
-parser.add_argument("interval", nargs="?", default=1,
+parser.add_argument("-I", "--interval", type=int, default=1,
     help="output interval, in seconds (default 1)")
 parser.add_argument("-s", "--size", default="b",
     help="size of aggregations, supported values are b, kb, mb, gb")
 args = parser.parse_args()
 
+level = logging.INFO
 if args.verbose:
-    logging.basicConfig(level=logging.DEBUG)
+    level = logging.DEBUG
 
+logging.basicConfig(level=level)
 
 logging.debug("Starting with the following args:")
 logging.debug(args)
 
 # args checking
-if args.interval and int(args.interval) == 0:
-    logging.error("interval 0. Exiting.")
+if int(args.interval) <= 0:
+    logging.error("Invalid interval, must be > 0. Exiting.")
     exit(1)
+else:
+    args.interval = int(args.interval)
 
 # map of supported sizes
 sizes = {
@@ -122,6 +120,8 @@ int kprobe__tcp_sendmsg(struct pt_regs *ctx, struct sock *sk,
 
 
 # Takes in a mask and returns the integer equivalent
+# e.g.
+# mask_to_int(8) returns 4278190080
 def mask_to_int(n):
     return ((1<<n) - 1) << (32 - n)
 
@@ -191,17 +191,14 @@ b = BPF(text=bpf_text)
 
 ipv4_send_bytes = b["ipv4_send_bytes"]
 
-logging.debug("Tracing... Output every %s secs. Hit Ctrl-C to end" % args.interval)
+logging.debug("Tracing... Output every %d secs. Hit Ctrl-C to end" % args.interval)
 
 # output
 exiting = 0
 while (1):
 
     try:
-        if args.interval:
-            sleep(int(args.interval))
-        else:
-            sleep(99999999)
+        sleep(args.interval)
     except KeyboardInterrupt:
         exiting = 1
 
@@ -211,6 +208,7 @@ while (1):
         if k not in keys:
             keys[k] = v
 
+    # to hold json data
     data = {}
 
     # output
@@ -231,4 +229,4 @@ while (1):
     ipv4_send_bytes.clear()
     
     if exiting:
-        exit()
+        exit(0)
