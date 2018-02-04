@@ -163,8 +163,8 @@ def generate_bpf_subnets(subnets):
     bpf = ''
     for i,s in enumerate(subnets):
         branch = template
-        branch = branch.replace("__NET_ADDR__", str(s[1]))
-        branch = branch.replace("__NET_MASK__", str(s[2]))
+        branch = branch.replace("__NET_ADDR__", str(socket.htonl(s[1])))
+        branch = branch.replace("__NET_MASK__", str(socket.htonl(s[2])))
         branch = branch.replace("__POS__", str(i))
         bpf += branch
     return bpf
@@ -227,6 +227,6 @@ while (1):
         print(json.dumps(data))
 
     ipv4_send_bytes.clear()
-    
+
     if exiting:
         exit(0)
